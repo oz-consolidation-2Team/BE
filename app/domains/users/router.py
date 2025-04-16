@@ -1,62 +1,169 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select # SQLAlchemy 2.0 스타일 쿼리 사용
+import jwt
+from fastapi import APIRouter, Depends, Header, HTTPException
 
 from app.core.db import get_db_session
-from app.models.users import User as UserModel
-from app.domains.users import schemas
+from app.models import User
 
-# 라우터 객체 생성
+from .schemas import (PasswordReset, TokenRefreshRequest, UserLogin,
+                      UserProfileUpdate, UserRegister)
+from .service import (ALGORITHM, SECRET_KEY, delete_user, get_user_details,
+                      login_user, recommend_jobs, refresh_access_token,
+                      register_user, reset_password, update_user)
+
 router = APIRouter()
 
-# 사용자 생성 API (POST /users/)
-@router.post("/", response_model=schemas.User, status_code=status.HTTP_201_CREATED)
-async def create_user(
-    user_in: schemas.UserCreate, # 요청 본문은 UserCreate 스키마로 받음
-    db: AsyncSession = Depends(get_db_session) # 비동기 세션 주입
+
+# 인증된 현재 사용자 의존성 확인
+@router.get("/user/me", tags=["User"])
+async def read_current_user(
+    Authorization: str = Header(...), db=Depends(get_db_session)
 ):
     """
-    새로운 사용자를 생성합니다.
-
-    - **email**: 사용자 이메일 (고유해야 함)
-    - **password**: 사용자 비밀번호 (요청 시에만 필요)
+    현재 인증된 사용자의 정보를 반환하는 엔드포인트.
+    Authorization 헤더에 포함된 JWT 토큰을 검증하여 사용자 정보를 조회.
     """
-    # 이미 존재하는 이메일인지 확인 
-    result = await db.execute(select(UserModel).filter(UserModel.email == user_in.email))
-    existing_user = result.scalar_one_or_none()
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="이미 사용 중인 이메일입니다.",
-        )
+    # 헤더에서 Bearer 토큰 추출
+    if Authorization.startswith("Bearer "):  # "Bearer " 접두사를 포함한 토큰인지 확인
+        token = Authorization.split(" ")[1]  # "Bearer " 이후의 실제 토큰 값을 추출
+    else:
+        raise HTTPException(status_code=401, detail="토큰이 제공되지 않았습니다.")
+    try:
+        # JWT 토큰 디코딩
+        payload = jwt.decode(
+            token, SECRET_KEY, algorithms=[ALGORITHM]
+        )  # JWT 토큰을 디코딩하여 payload 추출
+        user_id: str = payload.get("sub")  # sub 클레임에서 사용자 ID 추출
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="잘못된 토큰입니다.")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="토큰 검증 실패.")
 
-    # UserModel 객체 생성 (주의: 실제로는 비밀번호 해싱 필요!)
-    db_user = UserModel(email=user_in.email, password=user_in.password)
+    from sqlalchemy.future import select
 
-    # 데이터베이스에 추가 및 커밋
-    db.add(db_user)
-    await db.commit() # 여기서 명시적으로 커밋!
-    await db.refresh(db_user) # DB에 저장된 정보(예: 자동 생성된 ID)로 객체 업데이트
+    result = await db.execute(
+        select(User).filter(User.id == int(user_id))
+    )  # 사용자 ID로 DB에서 사용자 조회
+    user = result.scalar_one_or_none()  # 조회된 사용자 객체 반환 또는 예외 발생
+    if user is None:
+        raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
+    return user  # 조회된 사용자 객체 반환
 
-    # 생성된 사용자 정보 반환 (User 스키마에 따라 비밀번호 제외)
-    return db_user
 
-# 사용자 조회 API (GET /users/{user_id})
-@router.get("/{user_id}", response_model=schemas.User)
-async def read_user(
-    user_id: int, # 경로 매개변수로 사용자 ID 받음
-    db: AsyncSession = Depends(get_db_session) # 비동기 세션 주입
+# 회원가입
+@router.post("/user/register", tags=["User"])
+async def register(user_data: UserRegister, db=Depends(get_db_session)):
+    """
+    새로운 사용자를 등록하는 엔드포인트입니다.
+    사용자 정보를 받아 회원가입 비즈니스 로직을 호출합니다.
+    """
+    result = await register_user(db, user_data)  # service의 register_user 호출
+    return result  # 결과 반환
+
+
+# 로그인
+@router.post("/user/login", tags=["User"])
+async def login(user_credentials: UserLogin, db=Depends(get_db_session)):
+    """
+    사용자가 로그인하는 엔드포인트입니다.
+    사용자 자격 증명을 받아 로그인 비즈니스 로직을 호출합니다.
+    """
+    result = await login_user(db, user_credentials)  # service의 login_user 호출
+    return result  # 결과 반환
+
+
+# 로그아웃
+@router.post("/user/logout", tags=["User"])
+async def logout(Authorization: str = Header(...)):
+    """
+    사용자가 로그아웃하는 엔드포인트입니다.
+    JWT 기반의 로그아웃 처리로, 단순 성공 메시지를 반환합니다.
+    """
+    # (실제 운영에서는 토큰 블랙리스트 관리 등 추가 검증 필요)
+    return {"status": "success", "message": "로그아웃이 정상적으로 처리되었습니다."}
+
+
+# 사용자 프로필 업데이트
+@router.patch("/user/{user_id}", tags=["User"])
+async def update(
+    user_id: int,
+    update_data: UserProfileUpdate,
+    current_user: User = Depends(read_current_user),
+    db=Depends(get_db_session),
 ):
     """
-    주어진 ID의 사용자 정보를 조회합니다.
+    사용자의 프로필 정보를 업데이트하는 엔드포인트입니다.
+    사용자 ID와 업데이트할 데이터를 받아 프로필 업데이트 비즈니스 로직을 호출합니다.
     """
-    # SQLAlchemy 비동기 쿼리
-    result = await db.execute(select(UserModel).where(UserModel.id == user_id))
-    db_user = result.scalar_one_or_none() # 결과가 하나거나 없으면 None 반환
+    result = await update_user(
+        db, user_id, update_data, current_user
+    )  # service의 update_user 호출
+    return result  # 결과 반환
 
-    # 사용자가 없으면 404 에러 발생
-    if db_user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="사용자를 찾을 수 없습니다.")
 
-    # 조회된 사용자 정보 반환
-    return db_user
+# 회원 탈퇴
+@router.delete("/user/{user_id}", tags=["User"])
+async def delete(
+    user_id: int,
+    current_user: User = Depends(read_current_user),
+    db=Depends(get_db_session),
+):
+    """
+    사용자가 회원 탈퇴를 요청하는 엔드포인트입니다.
+    사용자 ID를 받아 회원 탈퇴 비즈니스 로직을 호출합니다.
+    """
+    result = await delete_user(db, user_id, current_user)  # service의 delete_user 호출
+    return result  # 결과 반환
+
+
+# 리프레쉬 토큰을 통한 액세스 토큰 재발급
+@router.post("/auth/refresh-token", tags=["Auth"])
+async def refresh_token(token_data: TokenRefreshRequest, db=Depends(get_db_session)):
+    """
+    리프레쉬 토큰을 사용하여 새로운 액세스 토큰을 발급하는 엔드포인트입니다.
+    리프레쉬 토큰 정보를 받아 액세스 토큰 재발급 비즈니스 로직을 호출합니다.
+    """
+    result = await refresh_access_token(
+        db, token_data
+    )  # service의 refresh_access_token 호출
+    return result  # 결과 반환
+
+
+# 사용자 정보 조회
+@router.get("/user/{user_id}", tags=["User"])
+async def get_user(
+    user_id: int,
+    current_user: User = Depends(read_current_user),
+    db=Depends(get_db_session),
+):
+    """
+    특정 사용자의 정보를 조회하는 엔드포인트입니다.
+    사용자 ID를 받아 사용자 정보 조회 비즈니스 로직을 호출합니다.
+    """
+    result = await get_user_details(
+        db, user_id, current_user
+    )  # service의 get_user_details 호출
+    return result  # 결과 반환
+
+
+# 비밀번호 재설정
+@router.post("/user/reset-password", tags=["User"])
+async def reset_pw(data: PasswordReset, db=Depends(get_db_session)):
+    """
+    사용자의 비밀번호를 재설정하는 엔드포인트입니다.
+    비밀번호 재설정 정보를 받아 비즈니스 로직을 호출합니다.
+    """
+    result = await reset_password(db, data)  # service의 reset_password 호출
+    return result  # 결과 반환
+
+
+# 관심분야 기반 추천 채용공고 제공
+@router.get("/user/recommend", tags=["User"])
+async def recommend(
+    current_user: User = Depends(read_current_user), db=Depends(get_db_session)
+):
+    """
+    사용자에게 추천 채용공고를 제공하는 엔드포인트입니다.
+    현재 사용자의 정보를 받아 추천 비즈니스 로직을 호출합니다.
+    """
+    result = await recommend_jobs(db, current_user)  # service의 recommend_jobs 호출
+    return result  # 결과 반환
