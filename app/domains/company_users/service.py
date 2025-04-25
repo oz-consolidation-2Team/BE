@@ -3,14 +3,23 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.domains.company_users.schemas import (CompanyUserBase,
-                                               CompanyUserRegisterRequest,
-                                               CompanyUserUpdateRequest,
-                                               FindCompanyUserEmail,
-                                               JobPostingsSummary,
-                                               ResetCompanyUserPassword)
-from app.domains.company_users.utiles import (check_password_match,
-                                              hash_password, verify_password)
+from app.core.utils import create_access_token
+from app.domains.company_users.schemas import (
+    CompanyTokenRefreshRequest,
+    CompanyUserBase,
+    CompanyUserRegisterRequest,
+    CompanyUserUpdateRequest,
+    FindCompanyUserEmail,
+    JobPostingsSummary,
+    ResetCompanyUserPassword,
+)
+from app.domains.company_users.utiles import (
+    check_password_match,
+    decode_refresh_token,
+    hash_password,
+    success_response,
+    verify_password,
+)
 from app.models import CompanyInfo, CompanyUser
 
 
@@ -266,3 +275,22 @@ async def reset_company_user_password(
     await db.refresh(user)
 
     return user.email
+
+
+# 리프레쉬 토큰으로 엑세스토큰 재발급
+async def refresh_company_user_access_token(
+    db: AsyncSession, token_data: CompanyTokenRefreshRequest
+):
+    payload = decode_refresh_token(token_data.refresh_token)
+    email: str = payload.get("sub")
+
+    result = await db.execute(select(CompanyUser).filter_by(email=email))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="해당 기업 회원을 찾을 수 없습니다.",
+        )
+    new_access_token = await create_access_token(data={"sub": user.email})
+
+    return {"access_token": new_access_token}
