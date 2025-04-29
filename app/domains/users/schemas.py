@@ -50,7 +50,7 @@ class UserProfileUpdate(BaseModel):
     )  # 새로운 비밀번호 업데이트: 선택 사항
     current_password: Optional[str] = Field(
         None, description="현재 비밀번호 (새 비밀번호 변경 시 필요)"
-    )  # ✅ 추가: 현재 비밀번호 입력
+    )  # 현재 비밀번호 입력
     phone_number: Optional[str] = Field(
         None, description="전화번호"
     )  # 전화번호 업데이트: 선택 사항
@@ -72,14 +72,37 @@ class UserProfileUpdate(BaseModel):
 
 
 # 비밀번호 재설정 요청 스키마 클래스
-class PasswordReset(BaseModel):
+class PasswordResetverify(BaseModel):
     email: str = Field(..., description="이메일")  # 이메일: 필수
     name: str = Field(..., description="사용자 이름")  # 사용자 이름: 필수
-    new_password: str = Field(
-        ..., description="새로운 비밀번호"
-    )  # 새로운 비밀번호: 필수
+    phone_number : str = Field(..., description="전화번호")  # 전화번호 : 필수
+    birthday : str = Field(..., description="생년월일")  # 생년월일 : 필수
+
+
+# 사용자 인증 성공 응답 스키마
+class PasswordResetVerifyResponse(BaseModel):
+    status: str  # 상태 (success)
+    data: dict   # {"user_id": int}
+
+
+# 비밀번호 재설정 요청용 스키마
+class PasswordResetConfirmRequest(BaseModel):
+    user_id: int = Field(..., description="인증 완료된 사용자 ID")  # 인증 완료된 사용자 ID
+    new_password: str = Field(..., description="새 비밀번호")  # 새 비밀번호
+    confirm_password: str = Field(..., description="비밀번호 재확인")  # 비밀번호 재확인
+
+# 비밀번호 재설정 성공 응답 스키마
+class PasswordResetConfirmResponse(BaseModel):
+    status: str  # 상태 (success)
+    message: str  # "비밀번호가 재설정되었습니다."
 
 
 # 리프레쉬 토큰을 사용한 액세스 토큰 재발급 요청 스키마 클래스
 class TokenRefreshRequest(BaseModel):
     refresh_token: str = Field(..., description="리프레쉬 토큰")  # 리프레쉬 토큰: 필수
+
+# 이메일 찾는 스키마
+class FindEmailRequest(BaseModel):
+    name: str
+    phone_number: str
+    birthday: str  # "YYYY-MM-DD"
